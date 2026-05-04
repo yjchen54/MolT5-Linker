@@ -91,3 +91,63 @@ class AntibodyResidueGAT(nn.Module):
 
         self.site_attention = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
         self.output_proj = nn.Linear(hidden_dim, output_dim)
+
+    def _build_graph(self, heavy: str, light: str):
+        """Build residue graph from antibody sequences."""
+        seq = heavy + light
+        seq = seq[:self.max_seq_len]
+
+        node_features = []
+        for aa in seq:
+            aa_idx = AA_VOCAB.get(aa, AA_VOCAB['X'])
+            emb = self.aa_embedding.weight[aa_idx]
+            feat = torch.tensor(AA_FEATURES.get(aa, AA_FEATURES['X']), dtype=torch.float32)
+            feat_proj = self.feat_proj(feat)
+            node_features.append(torch.cat([emb, feat_proj]))
+
+        x = torch.stack(node_features)
+
+        n = len(seq)
+        edges = []
+        for i in range(n):
+            for j in range(max(0, i - self.local_window), min(n, i + self.local_window + 1)):
+                if i != j:
+                    edges.append([i, j])
+
+        edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous() if edges else torch.empty((2, 0), dtype=torch.long)
+
+        return Data(x=x, edge_index=edge_index)
+
+    def forward(self, heavy_chains: List[str], light_chains: List[str]) -> torch.Tensor:
+        """Encode antibody sequences."""
+        device = next(self.parameters()).device
+        graphs = [self._build_graph(h, l) for h, l in zip(heavy_chains, light_chains)]
+        batch = Batch.from_data_list(graphs).to(device)
+
+        x = batch.x
+        for i, layer in enumerate(self.gat_layers):
+            x = layer(x, batch.edge_index)
+            if i < len(self.gat_layers) - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+
+        batch_size = len(graphs)
+        node_counts = [g.num_nodes for g in graphs]
+
+        outputs = []
+        start_idx = 0
+        for count in node_counts:
+            node_emb = x[start_idx:start_idx + count]
+
+            attn_out, _ = self.site_attention(
+                node_emb.unsqueeze(0),
+                node_emb.unsqueeze(0),
+                node_emb.unsqueeze(0)
+            )
+            pooled = attn_out.mean(dim=1)
+            outputs.append(pooled)
+            start_idx += count
+
+        h = torch.cat(outputs, dim=0)
+        return self.output_proj(h)
+
