@@ -41,8 +41,8 @@ rdkit>=2023.3.1
 ### Model Initialization
 
 ```python
-from models.molt5_fusion_clean import MolT5WithGATFusion
-from configs.config_template import get_default_config
+from models.molt5_fusion import MolT5WithGATFusion
+from configs.config import get_default_config
 
 config = get_default_config()
 
